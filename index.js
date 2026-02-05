@@ -26,7 +26,7 @@ app.post("/echo", (req, res) => {
 });
 
 // --------------------
-// BigQuery: teste mínimo (SELECT 1)
+// BigQuery: teste mínimo (SELECT 1)hghgh
 // --------------------
 app.get("/bq-test", async (req, res) => {
   try {
