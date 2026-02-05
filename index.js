@@ -3,10 +3,10 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
-// Healthcheck (Cloud Run / monitoramento)
-app.get("/healthz", (req, res) => {
-  res.status(200).json({ ok: true });
+app.get("/__health", (req, res) => {
+  res.status(200).send("ok");
 });
+
 
 // Raiz
 app.get("/", (req, res) => {
