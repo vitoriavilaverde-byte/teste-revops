@@ -48,6 +48,17 @@ app.get("/bq-test", async (req, res) => {
   }
 });
 
+
+
+# adiciona BigQuery no topo (se ainda não existir)
+grep -q '@google-cloud/bigquery' index.js || sed -i '1i const { BigQuery } = require("@google-cloud/bigquery");' index.js
+
+# cria cliente bq logo após app.use(express.json());
+grep -q 'const bq = new BigQuery' index.js || sed -i '/app.use(express.json());/a \\\n// Cliente BigQuery\\\nconst bq = new BigQuery();\\\n' index.js
+
+# adiciona a rota /bq-test antes do bloco do 404
+grep -q 'app.get("/bq-test"' index.js || sed -i '/app.use((req, res) => {/i \\\n// BigQuery: teste mínimo (SELECT 1)\\\napp.get(\"\\/bq-test\", async (req, res) => {\\\n  try {\\\n    const [job] = await bq.createQueryJob({\\\n      query: \"SELECT 1 AS ok\",\\\n      location: \"US\"\\\n    });\\\n    const [rows] = await job.getQueryResults();\\\n    res.status(200).json({ ok: true, rows });\\\n  } catch (e) {\\\n    res.status(500).json({ ok: false, error: String(e?.message || e) });\\\n  }\\\n});\\\n' index.js
+
 // --------------------
 // 404 no final
 // --------------------
