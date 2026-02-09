@@ -1,27 +1,26 @@
-// index.js
-import cors from "cors";
-
-app.use(cors({
-  origin: ["http://localhost:5173"],
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
-
-app.options("*", cors());
+// index.js (CommonJS)
 const express = require("express");
+const cors = require("cors");
 const { BigQuery } = require("@google-cloud/bigquery");
 
 const app = express();
 app.use(express.json());
 
-// CORS simples (MVP)
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.status(204).end();
-  next();
-});
+// CORS (dev + prod)
+const ALLOWED_ORIGINS = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  // "https://seu-front.com" // quando publicar
+];
+
+app.use(cors({
+  origin: ALLOWED_ORIGINS,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+
+// garante preflight
+app.options("*", cors());
 
 // BigQuery client (Cloud Run SA)
 const PROJECT_ID =
