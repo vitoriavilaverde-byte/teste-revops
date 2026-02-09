@@ -1,5 +1,7 @@
 cd ~/revops-api
-
+const DATASET = process.env.BQ_DATASET || "ussouth1";
+const TABLE = process.env.BQ_TABLE || "fact_kpis_daily";
+const LOCATION = process.env.BQ_LOCATION || "US";
 cat > index.js <<'JS'
 const express = require("express");
 const { BigQuery } = require("@google-cloud/bigquery");
