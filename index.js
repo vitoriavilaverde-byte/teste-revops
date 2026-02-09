@@ -15,7 +15,12 @@ app.use((req, res, next) => {
 });
 
 // BigQuery client (Cloud Run SA)
-const bq = new BigQuery();
+const PROJECT_ID =
+  process.env.BQ_PROJECT ||
+  process.env.GOOGLE_CLOUD_PROJECT ||
+  "looker-viz-484818";
+
+const bq = new BigQuery({ projectId: PROJECT_ID });
 
 // Helpers
 function parseDays(v, fallback = 30) {
