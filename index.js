@@ -10,22 +10,18 @@ app.use(express.json());
 // BigQuery client (uses Cloud Run service account)
 const bq = new BigQuery();
 
-// Root
 app.get("/", (req, res) => {
   res.status(200).json({ ok: true, message: "API online" });
 });
 
-// Health (path neutro)
 app.get("/__health", (req, res) => {
   res.status(200).send("ok");
 });
 
-// Echo
 app.post("/echo", (req, res) => {
   res.status(200).json({ received: req.body });
 });
 
-// BigQuery test
 app.get("/bq-test", async (req, res) => {
   try {
     const [job] = await bq.createQueryJob({
@@ -39,22 +35,23 @@ app.get("/bq-test", async (req, res) => {
   }
 });
 
+// Troque para uma tabela que existe no seu dataset
 app.get("/kpis", async (req, res) => {
   try {
     const query = `
-      SELECT
-        COUNT(*) as total
-      FROM \`looker-viz-484818.ussouth1.sua_tabela\`
+      SELECT *
+      FROM \`looker-viz-484818.ussouth1.fact_kpis_daily\`
+      ORDER BY date DESC
+      LIMIT 1
     `;
     const [job] = await bq.createQueryJob({ query, location: "US" });
     const [rows] = await job.getQueryResults();
-    res.json({ ok: true, data: rows[0] });
+    res.json({ ok: true, data: rows[0] || null });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-// 404
 app.use((req, res) => {
   res.status(404).json({ error: `Not found: ${req.method} ${req.path}` });
 });
