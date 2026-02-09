@@ -28,8 +28,7 @@ app.use(express.json());
 const allowedOrigins = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
-  // adicione seu domínio do front quando publicar:
-  // "https://seu-dominio.com",
+  "https://revops-dash-ggsujzzfjq-ue.a.run.app",
 ];
 
 app.use((req, res, next) => {
