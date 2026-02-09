@@ -1,13 +1,19 @@
-// index.js (Cloud Run + Express + BigQuery)
+// index.js — RevOps API (Cloud Run) + BigQuery + CORS OK
 // ------------------------------------------------------------
-// Endpoints:
-//   GET  /         -> { ok: true, message: "API online", version: "..." }
-//   GET  /healthz  -> { ok: true, version: "..." }
-//   GET  /kpis?client_id=dark&days=30 -> funil + conversões
+// Endpoints principais:
+//   GET  /                 -> { ok, message }
+//   GET  /healthz          -> redirect 308 -> /healthz/
+//   GET  /healthz/         -> { ok, version }
+//   GET  /__health         -> "ok" (compat legado)
+//   GET  /bq-test          -> teste BigQuery
+//   GET  /kpis             -> agregado fact_kpis_daily
+//   GET  /kpis/series      -> série fact_kpis_daily
+//   GET  /funnel           -> agregado + série fact_funnel_daily
+//   GET  /data-health      -> qualidade fact_data_health_daily
 //
 // CORS:
-//   libera somente http://localhost:5173 e http://127.0.0.1:5173
-//   responde OPTIONS com 204
+//   libera http://localhost:5173 e http://127.0.0.1:5173
+//   responde OPTIONS (preflight) com 204
 // ------------------------------------------------------------
 
 const express = require("express");
@@ -16,9 +22,9 @@ const { BigQuery } = require("@google-cloud/bigquery");
 const app = express();
 app.use(express.json());
 
-// ---------------------------
-// 1) CORS (whitelist)
-// ---------------------------
+// =====================
+// CORS (DEV + whitelist)
+// =====================
 const allowedOrigins = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
@@ -29,7 +35,7 @@ const allowedOrigins = [
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // libera só origens conhecidas
+  // Libera somente origens permitidas (quando há Origin)
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
@@ -44,182 +50,277 @@ app.use((req, res, next) => {
     "Content-Type, Authorization"
   );
 
-  // preflight
+  // Preflight
   if (req.method === "OPTIONS") return res.status(204).end();
 
   next();
 });
 
 // ---------------------------
-// 2) BigQuery client
-// ---------------------------
-const bigquery = new BigQuery({
-  projectId: process.env.BQ_PROJECT_ID || undefined,
-});
-
-// Helpers
-function toIntSafe(v, def) {
-  const n = parseInt(String(v ?? ""), 10);
-  return Number.isFinite(n) ? n : def;
-}
-function toStr(v) {
-  return String(v ?? "").trim();
-}
-function num(v, def = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : def;
-}
-function safeDiv(a, b) {
-  a = num(a, 0);
-  b = num(b, 0);
-  if (!b) return 0;
-  return a / b;
-}
-
-// ---------------------------
-// 3) Rotas
+// Versão (debug de deploy)
 // ---------------------------
 const VERSION = "cors-fix-v2";
 
-app.get("/", (req, res) => {
-  // essa rota existe hoje e é ótima pra validar deploy
-  res.json({ ok: true, message: "API online", version: VERSION });
-});
+// ------------------------------------------------------------
+// Config padrão (MVP)
+// ------------------------------------------------------------
+const PROJECT_ID =
+  process.env.BQ_PROJECT ||
+  process.env.GOOGLE_CLOUD_PROJECT ||
+  process.env.GCLOUD_PROJECT ||
+  "looker-viz-484818";
 
-app.get("/healthz", (req, res) => {
+const DATASET = process.env.BQ_DATASET || "ussouth1";
+
+// Tabelas/views que você já tem no dataset
+const T_FACT_KPIS = process.env.BQ_TABLE_KPIS || "fact_kpis_daily";
+const T_FACT_FUNNEL = process.env.BQ_TABLE_FUNNEL || "fact_funnel_daily";
+const T_FACT_HEALTH = process.env.BQ_TABLE_HEALTH || "fact_data_health_daily";
+
+// BigQuery client
+const bq = new BigQuery({ projectId: PROJECT_ID });
+const BQ_LOCATION = process.env.BQ_LOCATION || "US";
+
+// Helpers
+function asInt(v, def) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : def;
+}
+function asStr(v, def) {
+  const s = (v ?? "").toString().trim();
+  return s || def;
+}
+function tableRef(projectId, dataset, table) {
+  return `\`${projectId}.${dataset}.${table}\``;
+}
+
+// ------------------------------------------------------------
+// Rotas
+// ------------------------------------------------------------
+
+// Root (use pra checar se o serviço está no ar)
+app.get("/", (req, res) =>
+  res.status(200).json({ ok: true, message: "API online", version: VERSION })
+);
+
+// Health legado
+app.get("/__health", (req, res) => res.status(200).send("ok"));
+
+// Health novo: sem barra -> redireciona pra com barra
+app.get("/healthz", (req, res) => res.redirect(308, "/healthz/"));
+
+// Health novo: com barra (evita 404 no edge)
+app.get("/healthz/", (req, res) => {
   res.setHeader("X-REVOPS-VERSION", VERSION);
-  res.json({ ok: true, version: VERSION });
+  res.status(200).json({ ok: true, version: VERSION });
 });
 
-/**
- * KPI endpoint
- * GET /kpis?client_id=dark&days=30
- *
- * Observação:
- * - Eu deixei um “fallback” de exemplo caso o BigQuery não esteja configurado,
- *   pra você não ficar travado.
- * - Você pode substituir o SQL/tabela/colunas conforme seu schema real.
- */
-app.get("/kpis", async (req, res) => {
+// BigQuery connectivity test
+app.get("/bq-test", async (req, res) => {
   try {
-    const clientId = toStr(req.query.client_id);
-    const days = toIntSafe(req.query.days, 30);
-
-    if (!clientId) {
-      return res.status(400).json({ ok: false, error: "client_id é obrigatório" });
-    }
-    if (days < 1 || days > 365) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "days deve estar entre 1 e 365" });
-    }
-
-    // ---------------------------
-    // A) Tenta BigQuery (se houver envs)
-    // ---------------------------
-    const dataset = process.env.BQ_DATASET;
-    const table = process.env.BQ_TABLE_KPIS;
-
-    // Se você não configurou dataset/tabela, mantém comportamento estável
-    if (!dataset || !table) {
-      // Fallback: exemplo (substitua por sua lógica real)
-      const leads = 161;
-      const mql = 54;
-      const sql = 29;
-      const deals_total = 46;
-      const deals_won = 23;
-      const revenue = 163905.42;
-
-      return res.json({
-        ok: true,
-        data: {
-          client_id: clientId,
-          days_count: 42, // mantém padrão semelhante ao seu retorno atual
-          leads,
-          mql,
-          sql,
-          deals_total,
-          deals_won,
-          revenue,
-          cr_lead_to_mql: safeDiv(mql, leads),
-          cr_mql_to_sql: safeDiv(sql, mql),
-          cr_sql_to_won: safeDiv(deals_won, sql),
-        },
-      });
-    }
-
-    // ---------------------------
-    // B) Query real (ajuste os nomes das colunas)
-    // ---------------------------
-    // Esperado (exemplo):
-    // - client_id (STRING)
-    // - event_date (DATE)
-    // - leads, mql, sql, deals_total, deals_won, revenue (NUMERIC/INT)
-    //
-    // Se seu schema é diferente, me diga os nomes que eu adapto.
-    const query = `
-      SELECT
-        COUNT(DISTINCT event_date) AS days_count,
-        SUM(CAST(leads AS FLOAT64))       AS leads,
-        SUM(CAST(mql AS FLOAT64))         AS mql,
-        SUM(CAST(sql AS FLOAT64))         AS sql,
-        SUM(CAST(deals_total AS FLOAT64)) AS deals_total,
-        SUM(CAST(deals_won AS FLOAT64))   AS deals_won,
-        SUM(CAST(revenue AS FLOAT64))     AS revenue
-      FROM \`${bigquery.projectId}.${dataset}.${table}\`
-      WHERE client_id = @client_id
-        AND event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
-    `;
-
-    const options = {
-      query,
-      location: process.env.BQ_LOCATION || "US",
-      params: { client_id: clientId, days },
-    };
-
-    const [job] = await bigquery.createQueryJob(options);
+    const [job] = await bq.createQueryJob({
+      query: "SELECT 1 AS ok",
+      location: BQ_LOCATION,
+    });
     const [rows] = await job.getQueryResults();
-
-    const r = rows?.[0] || {};
-    const leads = num(r.leads, 0);
-    const mql = num(r.mql, 0);
-    const sqlN = num(r.sql, 0);
-    const dealsTotal = num(r.deals_total, 0);
-    const dealsWon = num(r.deals_won, 0);
-    const revenue = num(r.revenue, 0);
-    const daysCount = toIntSafe(r.days_count, 0);
-
-    return res.json({
+    res.status(200).json({
       ok: true,
-      data: {
-        client_id: clientId,
-        days_count: daysCount,
-        leads,
-        mql,
-        sql: sqlN,
-        deals_total: dealsTotal,
-        deals_won: dealsWon,
-        revenue,
-        cr_lead_to_mql: safeDiv(mql, leads),
-        cr_mql_to_sql: safeDiv(sqlN, mql),
-        cr_sql_to_won: safeDiv(dealsWon, sqlN),
-      },
+      rows,
+      projectId: PROJECT_ID,
+      dataset: DATASET,
+      location: BQ_LOCATION,
     });
-  } catch (err) {
-    console.error("ERROR /kpis:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "Erro interno ao calcular KPIs",
-      detail: err?.message ? String(err.message) : undefined,
-    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-// ---------------------------
-// 4) Start
-// ---------------------------
+/**
+ * GET /kpis?client_id=demo&days=30
+ * Retorna agregado simples (últimos N dias) da fact_kpis_daily
+ */
+app.get("/kpis", async (req, res) => {
+  const client_id = asStr(req.query.client_id, "demo");
+  const days = asInt(req.query.days, 30);
+
+  try {
+    const ref = tableRef(PROJECT_ID, DATASET, T_FACT_KPIS);
+
+    const query = `
+      SELECT
+        ANY_VALUE(client_id) AS client_id,
+        COUNT(*) AS days_count,
+        SUM(leads) AS leads,
+        SUM(mql) AS mql,
+        SUM(sql) AS sql,
+        SUM(deals_total) AS deals_total,
+        SUM(deals_won) AS deals_won,
+        SUM(revenue) AS revenue,
+        SAFE_DIVIDE(SUM(mql), NULLIF(SUM(leads),0)) AS cr_lead_to_mql,
+        SAFE_DIVIDE(SUM(sql), NULLIF(SUM(mql),0)) AS cr_mql_to_sql,
+        SAFE_DIVIDE(SUM(deals_won), NULLIF(SUM(sql),0)) AS cr_sql_to_won
+      FROM ${ref}
+      WHERE client_id = @client_id
+        AND date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+    `;
+
+    const [job] = await bq.createQueryJob({
+      query,
+      location: BQ_LOCATION,
+      params: { client_id, days },
+    });
+
+    const [rows] = await job.getQueryResults();
+    res.json({ ok: true, data: rows[0] || { client_id, days_count: 0 } });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/**
+ * GET /kpis/series?client_id=demo&days=30
+ * Série diária para charts (últimos N dias) da fact_kpis_daily
+ */
+app.get("/kpis/series", async (req, res) => {
+  const client_id = asStr(req.query.client_id, "demo");
+  const days = asInt(req.query.days, 30);
+
+  try {
+    const ref = tableRef(PROJECT_ID, DATASET, T_FACT_KPIS);
+
+    const query = `
+      SELECT
+        date,
+        leads,
+        mql,
+        sql,
+        deals_total,
+        deals_won,
+        revenue,
+        cr_lead_to_mql,
+        cr_mql_to_sql,
+        cr_sql_to_won
+      FROM ${ref}
+      WHERE client_id = @client_id
+        AND date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+      ORDER BY date ASC
+    `;
+
+    const [job] = await bq.createQueryJob({
+      query,
+      location: BQ_LOCATION,
+      params: { client_id, days },
+    });
+
+    const [rows] = await job.getQueryResults();
+    res.json({ ok: true, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/**
+ * GET /funnel?client_id=demo&days=30
+ * Usa fact_funnel_daily para retornar agregado + série
+ */
+app.get("/funnel", async (req, res) => {
+  const client_id = asStr(req.query.client_id, "demo");
+  const days = asInt(req.query.days, 30);
+
+  try {
+    const ref = tableRef(PROJECT_ID, DATASET, T_FACT_FUNNEL);
+
+    const queryAgg = `
+      SELECT
+        ANY_VALUE(client_id) AS client_id,
+        SUM(leads) AS leads,
+        SUM(mql) AS mql,
+        SUM(sql) AS sql,
+        SUM(deals_total) AS deals_total,
+        SUM(deals_won) AS deals_won,
+        SUM(revenue) AS revenue,
+        SAFE_DIVIDE(SUM(deals_won), NULLIF(SUM(sql),0)) AS win_rate_over_sql
+      FROM ${ref}
+      WHERE client_id = @client_id
+        AND date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+    `;
+
+    const querySeries = `
+      SELECT
+        date,
+        leads,
+        mql,
+        sql,
+        deals_total,
+        deals_won,
+        revenue,
+        win_rate_over_sql
+      FROM ${ref}
+      WHERE client_id = @client_id
+        AND date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+      ORDER BY date ASC
+    `;
+
+    const [jobAgg] = await bq.createQueryJob({
+      query: queryAgg,
+      location: BQ_LOCATION,
+      params: { client_id, days },
+    });
+    const [aggRows] = await jobAgg.getQueryResults();
+
+    const [jobSeries] = await bq.createQueryJob({
+      query: querySeries,
+      location: BQ_LOCATION,
+      params: { client_id, days },
+    });
+    const [seriesRows] = await jobSeries.getQueryResults();
+
+    res.json({ ok: true, data: aggRows[0] || {}, rows: seriesRows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/**
+ * GET /data-health?client_id=demo&days=30
+ * Retorna status de qualidade por tabela (fact_data_health_daily)
+ */
+app.get("/data-health", async (req, res) => {
+  const client_id = asStr(req.query.client_id, "demo");
+  const days = asInt(req.query.days, 30);
+
+  try {
+    const ref = tableRef(PROJECT_ID, DATASET, T_FACT_HEALTH);
+
+    // Ajuste o schema se sua fact_data_health_daily tiver colunas diferentes
+    const query = `
+      SELECT *
+      FROM ${ref}
+      WHERE client_id = @client_id
+        AND date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
+      ORDER BY date DESC
+      LIMIT 500
+    `;
+
+    const [job] = await bq.createQueryJob({
+      query,
+      location: BQ_LOCATION,
+      params: { client_id, days },
+    });
+
+    const [rows] = await job.getQueryResults();
+    res.json({ ok: true, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// ------------------------------------------------------------
+// Start
+// ------------------------------------------------------------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`RevOps API listening on :${PORT} | version=${VERSION}`);
+  console.log("Project:", PROJECT_ID, "Dataset:", DATASET, "Location:", BQ_LOCATION);
   console.log("Allowed origins:", allowedOrigins);
 });
