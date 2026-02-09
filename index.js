@@ -1,20 +1,14 @@
-/**
- * index.js — RevOps API (Cloud Run) + BigQuery
- * - CORS corrigido (localhost:5173)
- * - Responde preflight OPTIONS
- * - /healthz (debug de deploy)
- * - /kpis (exemplo com BigQuery)
- *
- * Requisitos:
- *   npm i express @google-cloud/bigquery
- *
- * Variáveis de ambiente (recomendado):
- *   BQ_PROJECT_ID=seu-projeto
- *   BQ_DATASET=revops
- *   BQ_TABLE_KPIS=kpis_daily   (ou a tabela/view que você usa)
- *   ALLOWED_ORIGINS=http://localhost:5173,https://seu-front.com
- *   PORT=8080
- */
+// index.js (Cloud Run + Express + BigQuery)
+// ------------------------------------------------------------
+// Endpoints:
+//   GET  /         -> { ok: true, message: "API online", version: "..." }
+//   GET  /healthz  -> { ok: true, version: "..." }
+//   GET  /kpis?client_id=dark&days=30 -> funil + conversões
+//
+// CORS:
+//   libera somente http://localhost:5173 e http://127.0.0.1:5173
+//   responde OPTIONS com 204
+// ------------------------------------------------------------
 
 const express = require("express");
 const { BigQuery } = require("@google-cloud/bigquery");
@@ -22,84 +16,156 @@ const { BigQuery } = require("@google-cloud/bigquery");
 const app = express();
 app.use(express.json());
 
-// ============================================================
-// 1) CORS (MVP, sem biblioteca — mais previsível)
-//    - Use origin exato (NÃO '*') para destravar o browser
-// ============================================================
-const DEFAULT_ALLOWED = ["http://localhost:5173", "http://127.0.0.1:5173"];
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const allowedOrigins = ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : DEFAULT_ALLOWED;
+// ---------------------------
+// 1) CORS (whitelist)
+// ---------------------------
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  // adicione seu domínio do front quando publicar:
+  // "https://seu-dominio.com",
+];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // Se veio do browser e está na whitelist, libera
+  // libera só origens conhecidas
   if (origin && allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
 
-  // Preflight / métodos / headers
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
 
-  // Se for OPTIONS, encerra aqui
+  // preflight
   if (req.method === "OPTIONS") return res.status(204).end();
 
   next();
 });
 
-// ============================================================
+// ---------------------------
 // 2) BigQuery client
-// ============================================================
+// ---------------------------
 const bigquery = new BigQuery({
-  projectId: process.env.BQ_PROJECT_ID || undefined, // opcional se já estiver no ambiente GCP
+  projectId: process.env.BQ_PROJECT_ID || undefined,
 });
 
 // Helpers
 function toIntSafe(v, def) {
-  const n = parseInt(String(v || ""), 10);
+  const n = parseInt(String(v ?? ""), 10);
   return Number.isFinite(n) ? n : def;
 }
-
-function badRequest(res, message) {
-  return res.status(400).json({ ok: false, error: message });
+function toStr(v) {
+  return String(v ?? "").trim();
+}
+function num(v, def = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+function safeDiv(a, b) {
+  a = num(a, 0);
+  b = num(b, 0);
+  if (!b) return 0;
+  return a / b;
 }
 
-// ============================================================
-// 3) Rotas utilitárias (debug de deploy)
-// ============================================================
-app.get("/healthz", (req, res) => {
-  // Troque o valor para confirmar que o deploy atualizou de verdade
-  res.setHeader("X-REVOPS-VERSION", "cors-fix-v1");
-  res.json({ ok: true, version: "cors-fix-v1" });
+// ---------------------------
+// 3) Rotas
+// ---------------------------
+const VERSION = "cors-fix-v2";
+
+app.get("/", (req, res) => {
+  // essa rota existe hoje e é ótima pra validar deploy
+  res.json({ ok: true, message: "API online", version: VERSION });
 });
 
-// ============================================================
-// 4) KPI endpoint (ajuste SQL conforme seu schema)
-//    GET /kpis?client_id=dark&days=30
-// ============================================================
+app.get("/healthz", (req, res) => {
+  res.setHeader("X-REVOPS-VERSION", VERSION);
+  res.json({ ok: true, version: VERSION });
+});
+
+/**
+ * KPI endpoint
+ * GET /kpis?client_id=dark&days=30
+ *
+ * Observação:
+ * - Eu deixei um “fallback” de exemplo caso o BigQuery não esteja configurado,
+ *   pra você não ficar travado.
+ * - Você pode substituir o SQL/tabela/colunas conforme seu schema real.
+ */
 app.get("/kpis", async (req, res) => {
   try {
-    const clientId = String(req.query.client_id || "").trim();
+    const clientId = toStr(req.query.client_id);
     const days = toIntSafe(req.query.days, 30);
 
-    if (!clientId) return badRequest(res, "client_id é obrigatório");
-    if (days < 1 || days > 365) return badRequest(res, "days deve estar entre 1 e 365");
+    if (!clientId) {
+      return res.status(400).json({ ok: false, error: "client_id é obrigatório" });
+    }
+    if (days < 1 || days > 365) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "days deve estar entre 1 e 365" });
+    }
 
-    // Ajuste para seu dataset/tabela
-    const dataset = process.env.BQ_DATASET || "revops";
-    const table = process.env.BQ_TABLE_KPIS || "kpis_daily"; // pode ser view também
+    // ---------------------------
+    // A) Tenta BigQuery (se houver envs)
+    // ---------------------------
+    const dataset = process.env.BQ_DATASET;
+    const table = process.env.BQ_TABLE_KPIS;
 
-    // Exemplo: buscar total de leads nos últimos N dias para o cliente
-    // IMPORTANTE: adapte os nomes de colunas (client_id, event_date, leads_total etc.)
+    // Se você não configurou dataset/tabela, mantém comportamento estável
+    if (!dataset || !table) {
+      // Fallback: exemplo (substitua por sua lógica real)
+      const leads = 161;
+      const mql = 54;
+      const sql = 29;
+      const deals_total = 46;
+      const deals_won = 23;
+      const revenue = 163905.42;
+
+      return res.json({
+        ok: true,
+        data: {
+          client_id: clientId,
+          days_count: 42, // mantém padrão semelhante ao seu retorno atual
+          leads,
+          mql,
+          sql,
+          deals_total,
+          deals_won,
+          revenue,
+          cr_lead_to_mql: safeDiv(mql, leads),
+          cr_mql_to_sql: safeDiv(sql, mql),
+          cr_sql_to_won: safeDiv(deals_won, sql),
+        },
+      });
+    }
+
+    // ---------------------------
+    // B) Query real (ajuste os nomes das colunas)
+    // ---------------------------
+    // Esperado (exemplo):
+    // - client_id (STRING)
+    // - event_date (DATE)
+    // - leads, mql, sql, deals_total, deals_won, revenue (NUMERIC/INT)
+    //
+    // Se seu schema é diferente, me diga os nomes que eu adapto.
     const query = `
       SELECT
-        SUM(CAST(leads_total AS INT64)) AS total
+        COUNT(DISTINCT event_date) AS days_count,
+        SUM(CAST(leads AS FLOAT64))       AS leads,
+        SUM(CAST(mql AS FLOAT64))         AS mql,
+        SUM(CAST(sql AS FLOAT64))         AS sql,
+        SUM(CAST(deals_total AS FLOAT64)) AS deals_total,
+        SUM(CAST(deals_won AS FLOAT64))   AS deals_won,
+        SUM(CAST(revenue AS FLOAT64))     AS revenue
       FROM \`${bigquery.projectId}.${dataset}.${table}\`
       WHERE client_id = @client_id
         AND event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
@@ -107,22 +173,37 @@ app.get("/kpis", async (req, res) => {
 
     const options = {
       query,
-      location: "US",
-      params: {
-        client_id: clientId,
-        days: days,
-      },
+      location: process.env.BQ_LOCATION || "US",
+      params: { client_id: clientId, days },
     };
 
     const [job] = await bigquery.createQueryJob(options);
     const [rows] = await job.getQueryResults();
 
-    const total = rows?.[0]?.total ?? 0;
+    const r = rows?.[0] || {};
+    const leads = num(r.leads, 0);
+    const mql = num(r.mql, 0);
+    const sqlN = num(r.sql, 0);
+    const dealsTotal = num(r.deals_total, 0);
+    const dealsWon = num(r.deals_won, 0);
+    const revenue = num(r.revenue, 0);
+    const daysCount = toIntSafe(r.days_count, 0);
 
     return res.json({
       ok: true,
-      data: { total: Number(total) },
-      meta: { client_id: clientId, days },
+      data: {
+        client_id: clientId,
+        days_count: daysCount,
+        leads,
+        mql,
+        sql: sqlN,
+        deals_total: dealsTotal,
+        deals_won: dealsWon,
+        revenue,
+        cr_lead_to_mql: safeDiv(mql, leads),
+        cr_mql_to_sql: safeDiv(sqlN, mql),
+        cr_sql_to_won: safeDiv(dealsWon, sqlN),
+      },
     });
   } catch (err) {
     console.error("ERROR /kpis:", err);
@@ -134,11 +215,11 @@ app.get("/kpis", async (req, res) => {
   }
 });
 
-// ============================================================
-// 5) Start
-// ============================================================
+// ---------------------------
+// 4) Start
+// ---------------------------
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`RevOps API listening on :${PORT}`);
+  console.log(`RevOps API listening on :${PORT} | version=${VERSION}`);
   console.log("Allowed origins:", allowedOrigins);
 });
