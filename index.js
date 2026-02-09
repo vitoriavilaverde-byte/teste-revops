@@ -39,6 +39,21 @@ app.get("/bq-test", async (req, res) => {
   }
 });
 
+app.get("/kpis", async (req, res) => {
+  try {
+    const query = `
+      SELECT
+        COUNT(*) as total
+      FROM \`looker-viz-484818.ussouth1.sua_tabela\`
+    `;
+    const [job] = await bq.createQueryJob({ query, location: "US" });
+    const [rows] = await job.getQueryResults();
+    res.json({ ok: true, data: rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 // 404
 app.use((req, res) => {
   res.status(404).json({ error: `Not found: ${req.method} ${req.path}` });
