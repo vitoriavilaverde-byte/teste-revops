@@ -1,4 +1,13 @@
 // index.js
+import cors from "cors";
+
+app.use(cors({
+  origin: ["http://localhost:5173"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+
+app.options("*", cors());
 const express = require("express");
 const { BigQuery } = require("@google-cloud/bigquery");
 
