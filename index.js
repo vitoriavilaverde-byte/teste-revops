@@ -38,17 +38,22 @@ app.get("/bq-test", async (req, res) => {
 // Troque para uma tabela que existe no seu dataset
 app.get("/kpis", async (req, res) => {
   try {
+    const datasetId = "ussouth1";
+    const tableId = "fact_kpis_daily"; // <-- TROCA AQUI
+
     const query = `
       SELECT *
-      FROM \`looker-viz-484818.ussouth1.fact_kpis_daily\`
+      FROM \`${process.env.GCLOUD_PROJECT}.${datasetId}.${tableId}\`
       ORDER BY date DESC
-      LIMIT 1
+      LIMIT 100
     `;
-    const [job] = await bq.createQueryJob({ query, location: "US" });
+
+    const [job] = await bigquery.createQueryJob({ query, location: "US" });
     const [rows] = await job.getQueryResults();
-    res.json({ ok: true, data: rows[0] || null });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+
+    res.json({ ok: true, rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
   }
 });
 
