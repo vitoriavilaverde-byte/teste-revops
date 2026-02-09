@@ -25,29 +25,26 @@ app.use(express.json());
 // =====================
 // CORS (DEV + whitelist)
 // =====================
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "https://revops-dash-ggsujzzfjq-ue.a.run.app",
-];
+const allowed = (origin) =>
+  origin === "http://localhost:5173" ||
+  origin === "http://127.0.0.1:5173" ||
+  /^https:\/\/revops-dash-.*\.run\.app$/.test(origin) ||
+  /^https:\/\/revops-dash-.*\.a\.run\.app$/.test(origin);
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
-  // Libera somente origens permitidas (quando há Origin)
-  if (origin && allowedOrigins.includes(origin)) {
+  if (origin && allowed(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
 
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+  next();
+});
 
   // Preflight
   if (req.method === "OPTIONS") return res.status(204).end();
