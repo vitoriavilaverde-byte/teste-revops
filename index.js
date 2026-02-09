@@ -109,7 +109,7 @@ app.get("/__health", (req, res) => res.status(200).send("ok"));
 // Health novo: sem barra -> redireciona pra com barra
 app.get("/healthz", (req, res) => res.redirect(308, "/healthz/"));
 
-// Health novo: com barra (evita 404 no edge)
+// Health novo: com barra
 app.get("/healthz/", (req, res) => {
   res.setHeader("X-REVOPS-VERSION", VERSION);
   res.status(200).json({ ok: true, version: VERSION });
